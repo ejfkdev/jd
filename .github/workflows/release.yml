@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build & release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      # 交叉编译：CGO 关闭、-trimpath 去本地路径、-ldflags "-s -w" 去符号表/DWARF，
+      # 并注入 tag 版本号到 main.Version。
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          LDFLAGS="-s -w -X github.com/ejfkdev/jd/internal/cli.Version=${VERSION}"
+          mkdir -p dist
+
+          build() { # $1=GOOS $2=GOARCH $3=output suffix
+            GOOS="$1" GOARCH="$2" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "${LDFLAGS}" -o "dist/jd$3" .
+          }
+
+          build linux   amd64 -linux-amd64
+          build linux   arm64 -linux-arm64
+          build darwin  amd64 -darwin-amd64
+          build darwin  arm64 -darwin-arm64
+          build windows amd64 -windows-amd64.exe
+          build windows arm64 -windows-arm64.exe
+
+      # UPX 压缩进一步减小体积（约 -65%）。
+      # 注意：不压缩 macOS 产物——UPX 打包的 Mach-O 会被 macOS 内核直接
+      # SIGKILL（签名/页校验问题），故仅压 Linux/Windows。
+      - name: UPX compress (linux & windows)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y && sudo apt-get install -y upx-ucl
+          upx --best --lzma dist/jd-linux-amd64
+          upx --best --lzma dist/jd-linux-arm64
+          upx --best --lzma dist/jd-windows-amd64.exe
+          upx --best --lzma dist/jd-windows-arm64.exe
+          ls -lh dist/
+
+      # 打包（unix 用 tar.gz，windows 用 zip）并生成 SHA256 校验和。
+      - name: Package & checksums
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          cd dist
+          for name in jd-linux-amd64 jd-linux-arm64 jd-darwin-amd64 jd-darwin-arm64; do
+            tar -czf "jd-${VERSION}-${name#jd-}.tar.gz" "$name"
+          done
+          mv jd-windows-amd64.exe "jd-${VERSION}-windows-amd64.exe"
+          mv jd-windows-arm64.exe "jd-${VERSION}-windows-arm64.exe"
+          zip -q "jd-${VERSION}-windows-amd64.zip" "jd-${VERSION}-windows-amd64.exe"
+          zip -q "jd-${VERSION}-windows-arm64.zip" "jd-${VERSION}-windows-arm64.exe"
+          rm -f jd-linux-* jd-darwin-* "jd-${VERSION}-windows-amd64.exe" "jd-${VERSION}-windows-arm64.exe"
+          sha256sum *.tar.gz *.zip > "jd-${VERSION}-checksums.txt"
+          ls -lh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*-checksums.txt

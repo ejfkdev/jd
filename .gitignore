@@ -1,0 +1,25 @@
+# Binary
+/jd
+*.exe
+
+# Test output directories (created by jd itself)
+*-deobfuscated/
+*-deobfuscates/
+
+# Large test samples (don't commit, keep locally)
+testdata/samples/app-big.js
+testdata/samples/app-pkg.js
+internal/deobfuscate/testdata/samples/main.js
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
