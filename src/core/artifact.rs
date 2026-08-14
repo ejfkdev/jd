@@ -20,6 +20,9 @@ pub enum OutputKind {
 #[derive(Debug, Clone)]
 pub struct ChildHandle { pub relative_path: String, pub hint: Option<String> }
 
+/// Hint that stops re-queueing (terminal child — don't process further).
+pub const TERMINAL_HINT: &str = "jd.terminal";
+
 #[derive(Debug)]
 pub struct ChildArtifact { pub handle: ChildHandle, pub bytes: Vec<u8> }
 

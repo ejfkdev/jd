@@ -1,7 +1,8 @@
 // passes/js — JavaScript deobfuscation pass.
 // Wraps existing jd JS logic (detect/deobfuscate/unminify/codegen/sandbox) into a Pass.
-// The existing modules stay in their current locations (src/detect, src/deobfuscate, etc.)
-// and are called directly from here.
+// Also includes esoteric decoder (jsfuck/jjencode/aaencode/packer) via boa sandbox.
+
+pub mod esoteric;
 
 use crate::core::pass::{Pass, Detector, PassId};
 use crate::core::artifact::{Artifact, OutputKind, Language};
@@ -34,7 +35,7 @@ impl Detector for JsDetector {
 
 pub static JS_DETECTOR: JsDetector = JsDetector;
 
-// -- Pass: wraps crate::deobfuscate::deobfuscate --
+// -- Pass: wraps crate::deobfuscate::deobfuscate + esoteric decoding --
 
 #[derive(Debug)]
 pub struct JsPass;
@@ -53,6 +54,24 @@ impl Pass for JsPass {
     fn run(&self, artifact: &Artifact) -> Result<Artifact, String> {
         let src = artifact.as_str();
         let opts = crate::deobfuscate::Options::default();
+        let detection = crate::detect::detect(src);
+
+        // Try esoteric decoding first (jsfuck/jjencode/aaencode/packer)
+        if matches!(detection.family,
+            crate::detect::ObfuscatorFamily::DeanEdwardsPacker
+            | crate::detect::ObfuscatorFamily::JsFuck
+            | crate::detect::ObfuscatorFamily::JjEncode
+            | crate::detect::ObfuscatorFamily::AaEncode
+        ) {
+            if let Some(decoded) = esoteric::decode(src, &detection, opts.timeout) {
+                // Run the decoded code through deobfuscation + unminify
+                let res = crate::deobfuscate::deobfuscate(&decoded, &opts);
+                return Ok(Artifact::new_raw(res.code.into_bytes()));
+            }
+            // Esoteric decode failed — fall through to normal processing
+        }
+
+        // Normal deobfuscation pipeline (obfuscator.io / minified / etc.)
         let res = crate::deobfuscate::deobfuscate(src, &opts);
         Ok(Artifact::new_raw(res.code.into_bytes()))
     }
