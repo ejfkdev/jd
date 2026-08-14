@@ -1,6 +1,4 @@
 // detect — identify which obfuscator produced the input.
-// Supports: obfuscator.io, JS-Confuser, Jscrambler, esoteric encoders (jsfuck/jjencode/aaencode/packer), bundlers.
-
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -33,40 +31,48 @@ const HEAD_BYTES: usize = 4096;
 const OBF_IO_MARKER: &str = "obfuscator.io";
 const JSCRAMBLER_MARKER: &str = "jscrambler";
 
-// JS-Confuser markers: state_sum (while+switch), rgf (array of functions), flatten
 static JSCONFUSER_STATE_SUM_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"(?ms)(?:while|switch)\s*\(\s*[A-Za-z_$][\w$]*(?:\s*\+\s*[A-Za-z_$][\w$]*){1,}\s*(?:!==|===|\))").ok()
 });
 
-// JsFuck: only ()[]!
 static JSFUCK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"^[\s()\[\]!]+$").ok()
 });
 
-// JJEncode: ~$ pattern
 static JJENCODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"~\$~\|").ok()
 });
 
-// AAEncode: kaomoji
 static AAENCODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"ﾟωﾟ").ok()
 });
 
-// Dean Edwards packer: eval(function(p,a,c,k,e,d)
 static PACKER_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"eval\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)").ok()
 });
 
-// webpack markers
+// obfuscator.io patterns
+static HEX_FUNC_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    // function _0xXXX() or var _0xXXX = function()
+    Regex::new(r"(?:function\s+_0x[0-9a-fA-F]+\s*\(|var\s+_0x[0-9a-fA-F]+\s*=\s*function\s*\(|const\s+_0x[0-9a-fA-F]+\s*=\s*function\s*\()").ok()
+});
+
+static STRING_ARRAY_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    // String array getter: function _0xXXX() { ... return _0xXXX = function(){return arr}(); ... }
+    // or: function _0xXXX() { ... _0xXXX = function(){return arr}; return _0xXXX(); ... }
+    // Supports both . and bracket notation
+    Regex::new(r"function\s+_0x[0-9a-fA-F]+\s*\(\s*\)\s*\{[^}]*_0x[0-9a-fA-F]+\s*=\s*function\s*\(\s*\)\s*\{[^}]*return\s+\w+").ok()
+});
+
+static PUSH_SHIFT_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    // push(shift()) pattern — obfuscator.io rotator (supports both .push and ['push'])
+    Regex::new(r"(?:\.push\s*\(\s*\w+\.shift\s*\(\s*\)\s*\)|\['push'\]\s*\(\s*\w+\['shift'\]\s*\(\s*\)\s*\))").ok()
+});
+
 const WEBPACK_RE_MARKER: &str = "__webpack_require__";
 const WEBPACK_CHUNK_MARKER: &str = "webpackChunk";
-
-// Vite markers
-const VITE_MARKER: &str = "__vite__";
 const VITE_DEPS: &str = "__vite__mapDeps";
 
-/// Detect the obfuscator family from source code.
 pub fn detect(source: &str) -> Detection {
     let head = if source.len() > HEAD_BYTES { &source[..HEAD_BYTES] } else { source };
     let mut markers = Vec::new();
@@ -99,7 +105,7 @@ pub fn detect(source: &str) -> Detection {
         }
     }
 
-    // AAEncode (kaomoji)
+    // AAEncode
     if let Some(ref re) = *AAENCODE_RE {
         if re.is_match(head) {
             markers.push("aaencode-kaomoji".into());
@@ -134,26 +140,31 @@ pub fn detect(source: &str) -> Detection {
         return Detection { family: ObfuscatorFamily::Vite, confidence: 0.85, markers };
     }
 
-    // Fallback: minified (single long line)
+    // obfuscator.io detection (without banner) — pattern-based
+    let has_hex_funcs = HEX_FUNC_RE.as_ref().map_or(false, |re| re.is_match(source));
+    let has_string_array = STRING_ARRAY_RE.as_ref().map_or(false, |re| re.is_match(source));
+    let has_push_shift = PUSH_SHIFT_RE.as_ref().map_or(false, |re| re.is_match(source));
+    let has_hex_names = source.contains("_0x");
+
+    if has_hex_funcs && (has_string_array || has_push_shift) {
+        markers.push("obfuscator-io-pattern".into());
+        if has_push_shift { markers.push("push-shift-rotator".into()); }
+        if has_string_array { markers.push("string-array-getter".into()); }
+        return Detection { family: ObfuscatorFamily::ObfuscatorIo, confidence: 0.8, markers };
+    }
+
+    // Fallback: hex names + push_shift OR while(!![])
+    if has_hex_names && (has_push_shift || source.contains("while(!![])") || source.contains("while (!!!![])")) {
+        markers.push("hex-names-rotator".into());
+        return Detection { family: ObfuscatorFamily::ObfuscatorIo, confidence: 0.6, markers };
+    }
+
+    // Minified: single long line
     let line_count = source.lines().count();
     if line_count <= 5 && source.len() > 1000 {
         markers.push("minified-single-line".into());
         return Detection { family: ObfuscatorFamily::Minified, confidence: 0.5, markers };
     }
 
-    // Unknown — try obfuscator.io detection via string array pattern
-    if looks_like_obfuscator_io(source) {
-        markers.push("string-array-pattern".into());
-        return Detection { family: ObfuscatorFamily::ObfuscatorIo, confidence: 0.6, markers };
-    }
-
     Detection { family: ObfuscatorFamily::Unknown, confidence: 0.0, markers }
-}
-
-/// Heuristic: does the source look like obfuscator.io output?
-fn looks_like_obfuscator_io(source: &str) -> bool {
-    // Look for string array function + decoder function patterns
-    let has_hex_names = source.contains("_0x") || source.contains("_0x5");
-    let has_string_array = source.contains("function ") && source.contains("return ") && source.contains("push(") && source.contains("shift(");
-    has_hex_names && has_string_array
 }

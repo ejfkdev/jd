@@ -5,23 +5,57 @@ use super::Options;
 
 pub fn deobfuscate(src: &str, opts: &Options, _warnings: &mut Vec<String>) -> String {
     let det = detect_string_array_and_decoders(src);
+    if opts.verbose {
+        if let Some(ref d) = det {
+            eprintln!("jd: obfuscator.io: array_fn={}, decoders={:?}, wrappers={:?}, rotator={}",
+                d.array_fn_name, d.decoder_names, d.wrapper_names, d.rotator_source.is_some());
+        } else {
+            eprintln!("jd: obfuscator.io: no string array detected");
+        }
+    }
     if det.is_none() {
         return src.to_string();
     }
     let det = det.unwrap();
 
     let setup = build_setup_code(src, &det);
+    if opts.verbose {
+        eprintln!("jd: setup len={}", setup.len());
+        eprintln!("jd: has $QL in setup: {}", setup.contains("$QL"));
+        // Save setup to file for debugging
+        let _ = std::fs::write("/tmp/jd_setup_debug.js", &setup);
+    }
     if setup.is_empty() {
         return src.to_string();
     }
 
     let call_sites = collect_call_sites(src, &det);
+    if opts.verbose {
+        eprintln!("jd: call_sites: {} found", call_sites.len());
+        for (i, s) in call_sites.iter().enumerate().take(5) {
+            eprintln!("jd:   [{}] {}", i, s);
+        }
+    }
     if call_sites.is_empty() {
         return remove_helpers(src, &det);
     }
 
     match sandbox::run(&setup, &call_sites, opts.timeout) {
         Ok(vals) => {
+            if opts.verbose {
+                eprintln!("jd: sandbox returned {} values", vals.len());
+                for (i, v) in vals.iter().enumerate().take(5) {
+                    if let Some(val) = v {
+                        if let Some(s) = sandbox::decode_string(val) {
+                            eprintln!("jd:   [{}] decoded: {:?}", i, s);
+                        } else {
+                            eprintln!("jd:   [{}] not a string: {:?}", i, val);
+                        }
+                    } else {
+                        eprintln!("jd:   [{}] none", i);
+                    }
+                }
+            }
             let mut output = src.to_string();
             for (i, call_src) in call_sites.iter().enumerate() {
                 if let Some(Some(v)) = vals.get(i) {
@@ -31,9 +65,18 @@ pub fn deobfuscate(src: &str, opts: &Options, _warnings: &mut Vec<String>) -> St
                     }
                 }
             }
-            remove_helpers(&output, &det)
+            let output = remove_helpers(&output, &det);
+            if opts.verbose {
+                eprintln!("jd: after remove_helpers, has _0x25ad: {}", output.contains("_0x25ad"));
+            }
+            output
         }
-        Err(_) => src.to_string(),
+        Err(e) => {
+            if opts.verbose {
+                eprintln!("jd: sandbox error: {}", e);
+            }
+            src.to_string()
+        }
     }
 }
 
@@ -77,32 +120,82 @@ fn extract_function_source(src: &str, name: &str) -> Option<String> {
     let mut brace_count = 0i32;
     let mut in_string = false;
     let mut string_char = '\0';
+    let mut escaped = false;
     let mut end = idx;
 
     for (i, c) in src[idx..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         if in_string {
-            if c == '\\' { continue; }
+            if c == '\\' { escaped = true; continue; }
             if c == string_char { in_string = false; }
-        } else {
-            match c {
-                '"' | '\'' => { in_string = true; string_char = c; }
-                '{' => brace_count += 1,
-                '}' => {
-                    brace_count -= 1;
-                    if brace_count == 0 { end = idx + i + 1; break; }
-                }
-                _ => {}
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '"' | '\'' => { in_string = true; string_char = c; }
+            '{' => brace_count += 1,
+            '}' => {
+                brace_count -= 1;
+                if brace_count == 0 { end = idx + i + 1; break; }
             }
+            _ => {}
         }
     }
     Some(src[idx..end].to_string())
 }
 
-fn find_rotator(src: &str, _array_fn_name: &str) -> Option<String> {
-    if let Some(idx) = src.find("while(!![])") {
-        let start = src[..idx].rfind("(function").or_else(|| src[..idx].rfind("!function"))?;
-        Some(src[start..idx + 100].to_string())
-    } else { None }
+fn find_rotator(src: &str, array_fn_name: &str) -> Option<String> {
+    if !src.contains("while(!![])") && !src.contains("while (!![])") {
+        return None;
+    }
+    let call_pattern = format!("{array_fn_name},");
+    let call_idx = src.find(&call_pattern)?;
+    let before = &src[..call_idx];
+    let start = before.rfind("(function").or_else(|| before.rfind("!function"))?;
+
+    // Extract the full IIFE: (function(){...})(args)
+    // Use the IIFE's opening ( as the starting paren_count=1.
+    let rot_src = &src[start..];
+    let mut paren_count = 0i32;
+    let mut in_string = false;
+    let mut string_char = '\0';
+    let mut escaped = false;
+    let mut end = 0;
+
+    for (i, c) in rot_src.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            if c == '\\' { escaped = true; continue; }
+            if c == string_char { in_string = false; }
+            continue;
+        }
+        match c {
+            '\\' => { escaped = true; }
+            '"' | '\'' => { in_string = true; string_char = c; }
+            '(' => paren_count += 1,
+            ')' => {
+                paren_count -= 1;
+                if paren_count == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            ';' if paren_count == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if end == 0 { return None; }
+    Some(rot_src[..end].to_string())
 }
 
 fn find_wrappers(src: &str, decoder_name: &str) -> Vec<(String, String)> {
@@ -118,13 +211,15 @@ fn find_wrappers(src: &str, decoder_name: &str) -> Vec<(String, String)> {
 
 fn build_setup_code(_src: &str, det: &StringArrayDetection) -> String {
     let mut parts = Vec::new();
+    // Order: array → decoder → wrappers → rotator (rotator must be last, it's an
+    // IIFE that executes immediately and calls the decoder)
     parts.push(det.array_fn_source.clone());
     for s in &det.decoder_sources { parts.push(s.clone()); }
+    for (alias, target) in &det.wrapper_names { parts.push(format!("var {}={}", alias, target)); }
     if let Some(ref rot) = det.rotator_source {
         if rot.starts_with("function") { parts.push(format!("({})", rot)); }
         else { parts.push(rot.clone()); }
     }
-    for (alias, target) in &det.wrapper_names { parts.push(format!("var {}={}", alias, target)); }
     parts.join(";")
 }
 
@@ -132,16 +227,64 @@ fn collect_call_sites(src: &str, det: &StringArrayDetection) -> Vec<String> {
     let mut sites = Vec::new();
     let mut names = det.decoder_names.clone();
     for (alias, _) in &det.wrapper_names { names.push(alias.clone()); }
+
     for name in &names {
-        let pattern = format!(r"\b{}\s*\(\s*[^;)]+\s*\)", name);
-        if let Ok(re) = regex::Regex::new(&pattern) {
-            for m in re.find_iter(src) {
-                let call = m.as_str().to_string();
-                if args_are_literal(&call) { sites.push(call); }
+        // Find call sites by scanning for name( and then balancing parens
+        // while respecting string literals.
+        let pattern = format!("{name}(");
+        let mut search_from = 0;
+        while let Some(rel) = src[search_from..].find(&pattern) {
+            let start = search_from + rel;
+            // Balance parens from start, respecting strings
+            let call = extract_balanced_call(&src[start..]);
+            if let Some(ref call) = call {
+                if args_are_literal(call) {
+                    sites.push(call.clone());
+                }
+                search_from = start + call.len();
+            } else {
+                search_from = start + pattern.len();
             }
         }
     }
     sites
+}
+
+/// Extract a balanced call expression from the start of s (s starts with name( ).
+fn extract_balanced_call(s: &str) -> Option<String> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() || chars[0] != '_' && !chars[0].is_alphabetic() {
+        return None;
+    }
+    // Find the opening (
+    let mut i = 0;
+    while i < chars.len() && chars[i] != '(' { i += 1; }
+    if i >= chars.len() { return None; }
+    i += 1; // skip (
+    let mut paren = 1i32;
+    let mut in_str = false;
+    let mut sc = '\0';
+    let mut esc = false;
+    let mut end = i;
+    while i < chars.len() {
+        let c = chars[i];
+        if esc { esc = false; i += 1; continue; }
+        if in_str {
+            if c == '\\' { esc = true; i += 1; continue; }
+            if c == sc { in_str = false; }
+            i += 1; continue;
+        }
+        match c {
+            '\\' => esc = true,
+            '"' | '\'' => { in_str = true; sc = c; }
+            '(' => paren += 1,
+            ')' => { paren -= 1; if paren == 0 { end = i + 1; break; } }
+            _ => {}
+        }
+        i += 1;
+    }
+    if end == 0 { return None; }
+    Some(chars[..end].iter().collect())
 }
 
 fn args_are_literal(call: &str) -> bool {
@@ -163,17 +306,35 @@ fn args_are_literal(call: &str) -> bool {
     }
 }
 
-fn remove_helpers(src: &str, det: &StringArrayDetection) -> String {
-    let mut output = src.to_string();
-    if let Some(func_src) = extract_function_source(src, &det.array_fn_name) {
-        output = output.replace(&func_src, "");
+fn remove_helpers(output: &str, det: &StringArrayDetection) -> String {
+    let mut result = output.to_string();
+    // Use the original function sources (from detection) to remove helpers.
+    result = result.replace(&det.array_fn_source, "");
+    for s in &det.decoder_sources {
+        result = result.replace(s, "");
     }
-    for name in &det.decoder_names {
-        if let Some(func_src) = extract_function_source(src, name) {
-            output = output.replace(&func_src, "");
+    // Remove wrapper alias declarations
+    for (alias, target) in &det.wrapper_names {
+        // Match: const/var/let alias = target;
+        let patterns = [
+            format!("var {alias}={target};"),
+            format!("var {alias}={target},"),
+            format!("const {alias}={target};"),
+            format!("const {alias}={target},"),
+            format!("let {alias}={target};"),
+            format!("let {alias}={target},"),
+            format!("var {alias} = {target};"),
+            format!("const {alias} = {target};"),
+        ];
+        for p in &patterns {
+            result = result.replace(p, "");
         }
     }
-    output
+    // Remove rotator IIFE
+    if let Some(ref rot) = det.rotator_source {
+        result = result.replace(rot, "");
+    }
+    result
 }
 
 fn escape_js_string(s: &str) -> String {
