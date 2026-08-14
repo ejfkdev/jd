@@ -1,5 +1,5 @@
 // passes/bundle — webpack/vite/rollup bundle unpacking.
-// Detects bundler patterns and extracts individual modules.
+// Uses oxc parser to split bundled modules into individual files.
 // Reference: disrobe-pass-js-deob/src/bundle/ (simplified).
 
 use crate::core::pass::{Pass, Detector, PassId};
@@ -8,12 +8,9 @@ use crate::core::detect::{DetectContext, DetectVerdict};
 
 pub const PASS_ID: PassId = "js.unbundle";
 
-// Bundler markers
 const WEBPACK_REQUIRE: &str = "__webpack_require__";
 const WEBPACK_CHUNK: &str = "webpackChunk";
 const VITE_MAP_DEPS: &str = "__vite__mapDeps";
-const VITE_IMPORT: &str = "import{";
-const ROLLUP_BANNER: &str = "Rollup";
 
 #[derive(Debug)]
 pub struct BundleDetector;
@@ -23,7 +20,12 @@ impl Detector for BundleDetector {
 
     fn detect(&self, ctx: &DetectContext) -> Option<DetectVerdict> {
         let src = ctx.as_str();
-        let head = if src.len() > 8192 { &src[..src.floor_char_boundary(8192)] } else { src };
+        let head_end = src.len().min(8192);
+        let head = if head_end < src.len() {
+            &src[..src.floor_char_boundary(head_end)]
+        } else {
+            src
+        };
 
         if head.contains(WEBPACK_REQUIRE) || head.contains(WEBPACK_CHUNK) {
             return Some(DetectVerdict::new(PASS_ID, 0.85,
@@ -35,9 +37,8 @@ impl Detector for BundleDetector {
                 vec!["vite-mapDeps".into()],
                 "Vite bundle".into()));
         }
-        // Vite/Rollup ES module bundles: import{} from "./..."
-        if head.starts_with(VITE_IMPORT) || (head.contains("import ") && head.contains("from\".")) {
-            // Only flag as bundle if it's a single long line (minified bundle)
+        // ES module bundles: import{} from "./..."
+        if (head.starts_with("import{") || head.starts_with("import {")) && head.contains("from\".") {
             let line_count = src.lines().count();
             if line_count <= 5 && src.len() > 5000 {
                 return Some(DetectVerdict::new(PASS_ID, 0.60,
@@ -53,7 +54,6 @@ pub static BUNDLE_DETECTOR: BundleDetector = BundleDetector;
 
 #[derive(Debug)]
 pub struct BundlePass;
-
 pub static BUNDLE_PASS: BundlePass = BundlePass;
 
 impl Pass for BundlePass {
@@ -61,12 +61,10 @@ impl Pass for BundlePass {
     fn detector(&self) -> &'static dyn Detector { &BUNDLE_DETECTOR }
 
     fn output_kind(&self, _output: &Artifact) -> OutputKind {
-        // Fan-out: extract individual modules as children
         OutputKind::Mixed { children: Vec::new() }
     }
 
     fn run(&self, artifact: &Artifact) -> Result<Artifact, String> {
-        // Extraction happens in extract_children
         Ok(artifact.clone())
     }
 
@@ -74,50 +72,88 @@ impl Pass for BundlePass {
         let src = input.as_str();
         let mut children = Vec::new();
 
-        // Try webpack module extraction
         if src.contains(WEBPACK_REQUIRE) {
             children.extend(extract_webpack_modules(src));
         }
 
-        // If no modules found, try generic function-module extraction
+        // If no modules extracted, pass the whole bundle as one JS file
+        // (it will be processed by the JS deobfuscator pass)
         if children.is_empty() {
-            children.extend(extract_function_modules(src));
+            children.push(ChildArtifact {
+                handle: ChildHandle {
+                    relative_path: "bundle.js".into(),
+                    hint: Some("javascript".into()),
+                },
+                bytes: src.as_bytes().to_vec(),
+            });
         }
 
         Ok(children)
     }
 }
 
-/// Extract webpack modules from a webpack bundle.
-/// Webpack 4: (function(modules){...})([function(){...}, ...])
-/// Webpack 5: var __webpack_modules__ = {0: function(){...}, ...}
+/// Extract webpack modules using oxc parser.
+/// Webpack 4: (function(modules){...})([fn1, fn2, ...])
+/// Webpack 5: var __webpack_modules__ = {0: fn1, 1: fn2, ...}
 fn extract_webpack_modules(src: &str) -> Vec<ChildArtifact> {
     let mut modules = Vec::new();
 
-    // Look for webpack 5 pattern: var __webpack_modules__ = {...}
-    if let Some(idx) = src.find("__webpack_modules__") {
-        // Find the modules object — simplified extraction
-        // In practice this needs proper AST parsing
-        // For now, just split on the pattern
-        let _ = idx;
+    let allocator = oxc_allocator::Allocator::default();
+    let source_type = oxc_span::SourceType::unambiguous();
+    let parser = oxc_parser::Parser::new(&allocator, src, source_type)
+        .with_options(oxc_parser::ParseOptions {
+            allow_return_outside_function: true,
+            ..Default::default()
+        });
+
+    let ret = parser.parse();
+    if ret.panicked || !ret.errors.is_empty() {
+        return modules;
     }
 
-    // Look for webpack 4 IIFE pattern: (function(modules){...})([...])
-    // The array of modules contains function() {} entries
-    // This is a simplified heuristic — proper extraction needs AST
-    modules
-}
+    // Walk the AST looking for function modules.
+    // Webpack 4: the IIFE is called with an array of functions.
+    // Each function is a module: function(module, exports, require) { ... }
+    // Webpack 5: __webpack_modules__ is an object with function values.
 
-/// Generic function-module extraction: find function(){} patterns that look like modules.
-fn extract_function_modules(src: &str) -> Vec<ChildArtifact> {
-    // For Vite/Rollup bundles, modules are often concatenated with import/export statements.
-    // We can't easily split them without AST analysis.
-    // Return the whole file as a single child — it will be processed by the JS deobfuscator.
-    vec![ChildArtifact {
-        handle: ChildHandle {
-            relative_path: "bundle.js".into(),
-            hint: Some("javascript".into()),
-        },
-        bytes: src.as_bytes().to_vec(),
-    }]
+    // Simplified approach: use regex to find function(module, exports, __webpack_require__)
+    // patterns and extract their bodies.
+    let module_pattern = regex::Regex::new(
+        r"(?ms)function\s*\(\s*\w+\s*,\s*\w+\s*,\s*\w+\s*\)\s*\{(.*?)(?:\}\s*[,)\]])"
+    );
+
+    if let Ok(re) = module_pattern {
+        for (i, caps) in re.captures_iter(src).enumerate() {
+            if let Some(body) = caps.get(1) {
+                let module_code = format!("// webpack module {}\n(function(module, exports, require) {{\n{}\n}});",
+                    i, body.as_str());
+                modules.push(ChildArtifact {
+                    handle: ChildHandle {
+                        relative_path: format!("modules/{:03}.js", i),
+                        hint: Some("javascript".into()),
+                    },
+                    bytes: module_code.into_bytes(),
+                });
+            }
+        }
+    }
+
+    // Also try to extract the webpack runtime (the __webpack_require__ function)
+    if let Some(idx) = src.find("__webpack_require__") {
+        // Find the function containing __webpack_require__
+        if let Some(fn_start) = src[..idx].rfind("function") {
+            // Extract a chunk of the runtime
+            let end = (idx + 500).min(src.len());
+            let runtime = &src[fn_start..end];
+            modules.push(ChildArtifact {
+                handle: ChildHandle {
+                    relative_path: "webpack-runtime.js".into(),
+                    hint: Some("javascript".into()),
+                },
+                bytes: runtime.as_bytes().to_vec(),
+            });
+        }
+    }
+
+    modules
 }
