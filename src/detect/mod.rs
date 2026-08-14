@@ -74,7 +74,12 @@ const WEBPACK_CHUNK_MARKER: &str = "webpackChunk";
 const VITE_DEPS: &str = "__vite__mapDeps";
 
 pub fn detect(source: &str) -> Detection {
-    let head = if source.len() > HEAD_BYTES { &source[..HEAD_BYTES] } else { source };
+    // Use floor_char_boundary to avoid panicking on multi-byte UTF-8 chars.
+    let head = if source.len() > HEAD_BYTES {
+        &source[..source.floor_char_boundary(HEAD_BYTES)]
+    } else {
+        source
+    };
     let mut markers = Vec::new();
 
     // obfuscator.io banner

@@ -3,7 +3,7 @@ use crate::deobfuscate::Options;
 
 pub fn unminify(src: &str, _opts: &Options, _warnings: &mut Vec<String>) -> String {
     let allocator = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::mjs();
+    let source_type = oxc_span::SourceType::unambiguous();
 
     let parser = oxc_parser::Parser::new(&allocator, src, source_type)
         .with_options(oxc_parser::ParseOptions {
