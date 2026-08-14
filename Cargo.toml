@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/ejfkdev/jd"
-description = "JavaScript deobfuscator (obfuscator.io + unminify). Rust port of webcrack and synchrony."
+description = "Multi-language deobfuscation framework. Rust port of webcrack, synchrony, and disrobe."
 keywords = ["javascript", "deobfuscator", "obfuscator-io", "reverse-engineering", "security"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -27,3 +27,5 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+wasmparser = "0.256"
+classfile-parser = "0.3"
