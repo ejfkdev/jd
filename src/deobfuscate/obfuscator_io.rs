@@ -5,26 +5,17 @@ use super::Options;
 
 pub fn deobfuscate(src: &str, opts: &Options, _warnings: &mut Vec<String>) -> String {
     let det = detect_string_array_and_decoders(src);
-    if opts.verbose {
-        if let Some(ref d) = det {
-            eprintln!("jd: obfuscator.io: array_fn={}, decoders={:?}, wrappers={:?}, rotator={}",
-                d.array_fn_name, d.decoder_names, d.wrapper_names, d.rotator_source.is_some());
-        } else {
-            eprintln!("jd: obfuscator.io: no string array detected");
-        }
-    }
     if det.is_none() {
         return src.to_string();
     }
     let det = det.unwrap();
 
-    let setup = build_setup_code(src, &det);
     if opts.verbose {
-        eprintln!("jd: setup len={}", setup.len());
-        eprintln!("jd: has $QL in setup: {}", setup.contains("$QL"));
-        // Save setup to file for debugging
-        let _ = std::fs::write("/tmp/jd_setup_debug.js", &setup);
+        eprintln!("jd: obfuscator.io: array={}, decoders={}, wrappers={}, rotator={}",
+            det.array_fn_name, det.decoder_names.len(), det.wrapper_names.len(), det.rotator_source.is_some());
     }
+
+    let setup = build_setup_code(src, &det);
     if setup.is_empty() {
         return src.to_string();
     }
@@ -32,9 +23,6 @@ pub fn deobfuscate(src: &str, opts: &Options, _warnings: &mut Vec<String>) -> St
     let call_sites = collect_call_sites(src, &det);
     if opts.verbose {
         eprintln!("jd: call_sites: {} found", call_sites.len());
-        for (i, s) in call_sites.iter().enumerate().take(5) {
-            eprintln!("jd:   [{}] {}", i, s);
-        }
     }
     if call_sites.is_empty() {
         return remove_helpers(src, &det);
@@ -43,18 +31,7 @@ pub fn deobfuscate(src: &str, opts: &Options, _warnings: &mut Vec<String>) -> St
     match sandbox::run(&setup, &call_sites, opts.timeout) {
         Ok(vals) => {
             if opts.verbose {
-                eprintln!("jd: sandbox returned {} values", vals.len());
-                for (i, v) in vals.iter().enumerate().take(5) {
-                    if let Some(val) = v {
-                        if let Some(s) = sandbox::decode_string(val) {
-                            eprintln!("jd:   [{}] decoded: {:?}", i, s);
-                        } else {
-                            eprintln!("jd:   [{}] not a string: {:?}", i, val);
-                        }
-                    } else {
-                        eprintln!("jd:   [{}] none", i);
-                    }
-                }
+                eprintln!("jd: sandbox: {} values returned", vals.len());
             }
             let mut output = src.to_string();
             for (i, call_src) in call_sites.iter().enumerate() {
@@ -65,11 +42,7 @@ pub fn deobfuscate(src: &str, opts: &Options, _warnings: &mut Vec<String>) -> St
                     }
                 }
             }
-            let output = remove_helpers(&output, &det);
-            if opts.verbose {
-                eprintln!("jd: after remove_helpers, has _0x25ad: {}", output.contains("_0x25ad"));
-            }
-            output
+            remove_helpers(&output, &det)
         }
         Err(e) => {
             if opts.verbose {
