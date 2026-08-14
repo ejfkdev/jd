@@ -52,6 +52,18 @@ For files goja cannot fully parse (e.g. Monaco editor language definitions with 
 
 ## Installation
 
+### macOS (Homebrew)
+
+```bash
+brew install ejfkdev/tap/jd
+```
+
+### Pre-built binaries
+
+Download from [GitHub Releases](https://github.com/ejfkdev/jd/releases) (Linux/macOS/Windows, x86_64/ARM64).
+
+### Build from source
+
 ```bash
 go build -o jd .
 ```

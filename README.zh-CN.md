@@ -52,6 +52,18 @@ goja 的解析器不支持 ES module 语法 (`import`/`export`)。jd 会预先�
 
 ## 安装
 
+### macOS (Homebrew)
+
+```bash
+brew install ejfkdev/tap/jd
+```
+
+### 预编译二进制
+
+从 [GitHub Releases](https://github.com/ejfkdev/jd/releases) 下载 (Linux/macOS/Windows, x86_64/ARM64)。
+
+### 源码编译
+
 ```bash
 go build -o jd .
 ```
