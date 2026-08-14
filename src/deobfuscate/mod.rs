@@ -21,6 +21,18 @@ pub struct Options {
     pub verbose: bool,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            deobfuscate: true,
+            unminify: true,
+            sandbox: SandboxMode::Auto,
+            timeout: Duration::from_secs(10),
+            verbose: false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Result {
     pub code: String,

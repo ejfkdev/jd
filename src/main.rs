@@ -1,11 +1,15 @@
-// jd — JavaScript deobfuscator (obfuscator.io + unminify)
-// Rust port of webcrack and synchrony, inspired by disrobe's architecture.
+// jd — multi-language deobfuscation framework.
+// Architecture inspired by disrobe: Pass/Detector/Registry for plugin-style
+// multi-language support. New languages only need to implement Pass + Detector
+// and register in passes::build_registry().
 mod cli;
+mod core;
 mod detect;
 mod deobfuscate;
-mod unminify;
-mod sandbox;
 mod codegen;
+mod passes;
+mod sandbox;
+mod unminify;
 
 fn main() {
     cli::run();
