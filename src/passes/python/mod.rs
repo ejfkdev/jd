@@ -25,21 +25,39 @@ impl Detector for PythonDetector {
         if bytes.len() < 16 {
             return None;
         }
-        // Python 3.x: first 4 bytes are the magic number (little-endian u16 repeated)
-        let magic = u16::from_le_bytes([bytes[0], bytes[1]]);
-        // Python 2.x: 0x03f3 followed by \r\n (0x0d 0x0a)
-        if magic == 0x03f3 && bytes[2] == 0x0d && bytes[3] == 0x0a {
+        // Python .pyc files have a 16-byte header (Python 3.7+):
+        //   bytes 0-1: magic number (version-specific)
+        //   bytes 2-3: 0x0d 0x0a (\r\n) for Python 3, or 0x0d 0x0a for Python 2
+        //   bytes 4-7: flags (Python 3.7+) or timestamp (Python 2-3.6)
+        //   bytes 8-15: source size (Python 3.7+)
+
+        // Python 2.x: magic 0x03f3 + \r\n
+        if bytes[0] == 0x03 && bytes[1] == 0xf3 && bytes[2] == 0x0d && bytes[3] == 0x0a {
             return Some(DetectVerdict::new(PASS_ID, 0.90,
                 vec!["pyc-magic-python2".into()],
                 "Python 2.x .pyc bytecode".into()));
         }
-        // Python 3.x: magic is in range 0x6100..0x6F00, followed by \r\n (0x0d 0x0a)
-        if magic >= PYC_MAGIC_RANGE_START && magic <= PYC_MAGIC_RANGE_END
-            && (bytes[2] == 0x0d || bytes[2] == 0x00) {
-            return Some(DetectVerdict::new(PASS_ID, 0.95,
-                vec!["pyc-magic-python3".into()],
-                format!("Python 3.x .pyc bytecode (magic 0x{:04x})", magic)));
+
+        // Python 3.x: magic is 2 bytes, followed by \r\n (0x0d 0x0a).
+        // But for Python 3.14+: magic = 0xa7 0x0d, and \r\n = 0x0a 0x0a
+        // (the 0x0d is shared between magic and \r).
+        // So the pattern is: bytes[1]==0x0d OR bytes[2]==0x0d,
+        // AND there's a 0x0a somewhere in bytes[2:4].
+        // Simplified: check if bytes contain 0x0d 0x0a in positions 1-2 or 2-3,
+        // and the first byte looks like a Python magic.
+        let has_crlf = (bytes[1] == 0x0d && bytes[2] == 0x0a) ||
+                       (bytes[2] == 0x0d && bytes[3] == 0x0a);
+        if has_crlf {
+            let b0 = bytes[0];
+            // Exclude known other formats' first bytes
+            if b0 != 0x00 && b0 != 0x4d && b0 != 0x7f && b0 != 0xca && b0 != 0x60 &&
+               b0 != 0x50 && b0 != 0xfe && b0 != 0xcf && b0 != 0x03 {
+                return Some(DetectVerdict::new(PASS_ID, 0.85,
+                    vec![format!("pyc-magic-0x{:02x}{:02x}", bytes[0], bytes[1])],
+                    format!("Python .pyc bytecode (magic 0x{:02x}{:02x})", bytes[0], bytes[1])));
+            }
         }
+
         None
     }
 }

@@ -169,33 +169,62 @@ fn walkdir(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 }
 
 fn process_stdin(cli: &Cli, opts: &deobfuscate::Options) -> Result<(), Box<dyn std::error::Error>> {
-    let mut src = String::new();
-    io::stdin().read_to_string(&mut src)?;
-    let res = deobfuscate::deobfuscate(&src, opts);
-    output_result(&res, cli, &mut io::stdout())
+    let mut buf = Vec::new();
+    io::stdin().read_to_end(&mut buf)?;
+    let output = process_bytes(&buf, cli, opts);
+    print!("{}", output);
+    Ok(())
 }
 
 fn process_file_to_stdout(path: &Path, cli: &Cli, opts: &deobfuscate::Options) -> Result<(), Box<dyn std::error::Error>> {
-    let src = fs::read_to_string(path)?;
-    let res = deobfuscate::deobfuscate(&src, opts);
-    output_result(&res, cli, &mut io::stdout())
-}
-
-fn process_file(input: &Path, output: &Path, _cli: &Cli, opts: &deobfuscate::Options) -> Result<(), Box<dyn std::error::Error>> {
-    let src = fs::read_to_string(input)?;
-    let res = deobfuscate::deobfuscate(&src, opts);
-    fs::write(output, &res.code)?;
+    let buf = fs::read(path)?;
+    let output = process_bytes(&buf, cli, opts);
+    print!("{}", output);
     Ok(())
 }
 
-fn output_result<W: Write>(res: &deobfuscate::Result, cli: &Cli, w: &mut W) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.json {
-        let json = serde_json::json!({"code": res.code, "warnings": res.warnings});
-        writeln!(w, "{}", serde_json::to_string_pretty(&json)?)?;
+fn process_file(input: &Path, output: &Path, cli: &Cli, opts: &deobfuscate::Options) -> Result<(), Box<dyn std::error::Error>> {
+    let buf = fs::read(input)?;
+    let result = process_bytes(&buf, cli, opts);
+    fs::write(output, result.as_bytes())?;
+    Ok(())
+}
+
+/// Process raw bytes — auto-detect format and route to the right pass.
+/// Binary files (pyc/class/wasm/exe/elf/asar) go through PassRegistry.
+/// Text files (JS) go through deobfuscate::deobfuscate.
+fn process_bytes(bytes: &[u8], cli: &Cli, opts: &deobfuscate::Options) -> String {
+    // First try PassRegistry — it checks magic bytes for all binary formats.
+    let registry = crate::passes::build_registry();
+    let ctx = crate::core::detect::DetectContext {
+        bytes,
+        path_hint: None,
+        depth: 0,
+    };
+
+    if let Some(pick) = registry.run_all_and_pick(&ctx) {
+        if cli.verbose {
+            eprintln!("jd: detected: {} ({})", pick.verdict.pass_id, pick.verdict.explain);
+        }
+        let artifact = crate::core::artifact::Artifact::new_raw(bytes.to_vec());
+        match pick.pass.run(&artifact) {
+            Ok(result) => String::from_utf8(result.bytes).unwrap_or_else(|e| {
+                format!("// Binary output ({} bytes, UTF-8 conversion failed: {})\n// Pass: {}", bytes.len(), e, pick.verdict.pass_id)
+            }),
+            Err(e) => format!("// Error: {}\n// Pass: {}", e, pick.verdict.pass_id),
+        }
     } else {
-        w.write_all(res.code.as_bytes())?;
+        // No binary format detected — treat as text (JS source code)
+        let src = std::str::from_utf8(bytes).unwrap_or("");
+        let res = deobfuscate::deobfuscate(src, opts);
+        if cli.json {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "code": res.code, "warnings": res.warnings
+            })).unwrap_or_default()
+        } else {
+            res.code
+        }
     }
-    Ok(())
 }
 
 fn process_dir(files: &[FileInput], out_dir: &Path, cli: &Cli, opts: &deobfuscate::Options) -> Result<(), Box<dyn std::error::Error>> {

@@ -85,8 +85,22 @@ impl Pass for AsarPass {
     }
 
     fn run(&self, artifact: &Artifact) -> Result<Artifact, String> {
-        // The actual extraction happens in extract_children
-        Ok(artifact.clone())
+        // Extract children and return them as a concatenated listing
+        let children = extract_asar(&artifact.bytes)?;
+        let mut output = String::from("// ASAR Archive Extracted\n");
+        output.push_str(&format!("// {} files extracted:\n", children.len()));
+        for child in &children {
+            output.push_str(&format!("// - {} ({} bytes)\n", child.handle.relative_path, child.bytes.len()));
+            if let Some(ref hint) = child.handle.hint {
+                if hint == "javascript" {
+                    // Include JS file content
+                    if let Ok(content) = std::str::from_utf8(&child.bytes) {
+                        output.push_str(&format!("\n// --- {} ---\n{}\n", child.handle.relative_path, content));
+                    }
+                }
+            }
+        }
+        Ok(Artifact::new_raw(output.into_bytes()))
     }
 
     fn extract_children(&self, input: &Artifact) -> Result<Vec<ChildArtifact>, String> {
@@ -114,19 +128,29 @@ fn extract_asar(bytes: &[u8]) -> Result<Vec<ChildArtifact>, String> {
     // Actually asar format: 4 bytes (header size LE) + 4 bytes (payload size LE = 4) + 4 bytes padding + JSON
     // The anchor {"files": starts right after the pickle prefix
     let json_start = anchor_pos;
-    let json_end = json_start + header_size;
-    if json_end > bytes.len() {
-        return Err("asar header extends beyond file".into());
-    }
+    // The header_size from the pickle is the total size after the first 4-byte
+    // field, which includes: 4 (json_size_field) + 4 (padding) + 4 (padding) + JSON
+    // So JSON length = header_size - 8 (but may have padding at the end)
+    // We need to find the actual end of JSON by scanning for the closing brace.
+    let json_max_end = (json_start + header_size).min(bytes.len());
 
-    let json_str = std::str::from_utf8(&bytes[json_start..json_end])
+    // Find the actual JSON end by looking for the matching closing brace
+    let json_bytes = &bytes[json_start..json_max_end];
+    let json_str = std::str::from_utf8(json_bytes)
         .map_err(|e| format!("asar JSON parse error: {e}"))?;
 
-    let root: AsarNode = serde_json::from_str(json_str)
+    // The JSON may have trailing padding or file data after it.
+    // Find the actual end of JSON by scanning for the matching closing brace
+    // at the top level.
+    let json_actual_end = find_json_end(json_bytes)
+        .ok_or("asar JSON: could not find end of JSON object")?;
+    let json_trimmed = &json_str[..json_actual_end];
+    let root: AsarNode = serde_json::from_str(json_trimmed)
         .map_err(|e| format!("asar JSON parse error: {e}"))?;
 
-    // Data section starts after the header, aligned to 4 bytes
-    let data_base = json_end + (4 - (json_end % 4)) % 4;
+    // Data section starts after: JSON (padded to 4 bytes)
+    let json_padded_len = (json_actual_end + 3) & !3; // align to 4 bytes
+    let data_base = json_start + json_padded_len;
 
     let mut children = Vec::new();
     extract_node(&root, "", bytes, data_base, &mut children);
@@ -180,4 +204,38 @@ fn extract_node(node: &AsarNode, prefix: &str, bytes: &[u8], data_base: usize, o
 /// Find a byte slice within another, returns the starting index.
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Find the end position (exclusive) of a JSON object starting with `{`.
+/// Scans for matching braces, respecting string literals.
+fn find_json_end(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() || bytes[0] != b'{' {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            if b == b'\\' { escaped = true; }
+            else if b == b'"' { in_string = false; }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
