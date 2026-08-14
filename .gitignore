@@ -1,15 +1,14 @@
+# Rust
+/target/
+Cargo.lock
+
 # Binary
 /jd
 *.exe
 
-# Test output directories (created by jd itself)
+# Test output directories
 *-deobfuscated/
 *-deobfuscates/
-
-# Large test samples (don't commit, keep locally)
-testdata/samples/app-big.js
-testdata/samples/app-pkg.js
-internal/deobfuscate/testdata/samples/main.js
 
 # IDE
 .idea/
@@ -20,6 +19,3 @@ internal/deobfuscate/testdata/samples/main.js
 # OS
 .DS_Store
 Thumbs.db
-
-# Go
-vendor/
