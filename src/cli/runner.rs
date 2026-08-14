@@ -55,6 +55,10 @@ pub struct Cli {
     #[arg(long, default_value = "true")]
     copy_noncode: bool,
 
+    /// Auto-chain depth (0=disable, default=8: asar→deobfuscate→unbundle→...)
+    #[arg(long, default_value = "8")]
+    depth: u8,
+
     /// Print diagnostics to stderr
     #[arg(short = 'v', long)]
     verbose: bool,
